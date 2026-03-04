@@ -35,11 +35,16 @@ env/
 .DS_Store
 
 # 项目特定文件
+.github/
 cookie.txt
 *.json
 *.txt
 !requirements.txt
 !README.md
+
+# 输出目录（但保留目录结构）
+output/
+!output/.gitkeep
 
 # 调试截图
 debug_*.png

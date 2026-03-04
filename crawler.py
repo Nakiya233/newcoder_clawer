@@ -6,6 +6,8 @@ from selenium.webdriver.chrome.service import Service
 import time
 import json
 import os
+from datetime import datetime
+import re
 
 class NowCoderCrawler:
     def __init__(self, cookie_file='cookie.txt'):
@@ -39,6 +41,12 @@ class NowCoderCrawler:
             raise
         
         self.wait = WebDriverWait(self.driver, 10)
+        
+        # 创建输出目录
+        self.output_dir = 'output'
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+            print(f"✓ 创建输出目录: {self.output_dir}")
         
         # 读取cookie
         self.cookies = self.load_cookies(cookie_file)
@@ -176,13 +184,17 @@ class NowCoderCrawler:
                 content = self.extract_question_content()
                 
                 if content:
-                    results.append({
+                    result_data = {
                         'index': i + 1,
                         'title': title,
                         'question': content['question'],
                         'answer': content['answer']
-                    })
+                    }
+                    results.append(result_data)
                     print(f"✓ 成功提取内容")
+                    
+                    # 立即保存为Markdown文件
+                    self.save_question_as_markdown(result_data, url)
                 else:
                     print(f"✗ 提取内容失败")
                 
@@ -226,12 +238,17 @@ class NowCoderCrawler:
             # 获取问题描述
             try:
                 if question_element:
-                    question_text = question_element.text
+                    # 先尝试获取具体的问题内容区域
+                    try:
+                        question_content = question_element.find_element(By.CSS_SELECTOR, ".question-desc-content")
+                        question_html = question_content.get_attribute('innerHTML')
+                    except:
+                        question_html = question_element.get_attribute('innerHTML')
                 else:
-                    question_text = "未找到问题描述"
-                print(f"  → 问题描述长度: {len(question_text)} 字符")
+                    question_html = "未找到问题描述"
+                print(f"  → 问题描述长度: {len(question_html)} 字符")
             except:
-                question_text = "未找到问题描述"
+                question_html = "未找到问题描述"
             
             # 查找并点击"查看解题思路"按钮
             print("  → 查找'查看解题思路'按钮...")
@@ -283,31 +300,38 @@ class NowCoderCrawler:
                 # 查找答案区域 (根据HTML结构)
                 answer_element = self.driver.find_element(By.CSS_SELECTOR, ".question-answer-wrap")
                 
-                # 获取所有display不为none的div
-                answer_divs = answer_element.find_elements(By.CSS_SELECTOR, "div[style*='display']")
-                answer_text = ""
+                # 尝试获取.answer-brief元素（实际答案内容）
+                answer_html = ""
+                try:
+                    answer_brief = answer_element.find_element(By.CSS_SELECTOR, ".answer-brief")
+                    answer_html = answer_brief.get_attribute('innerHTML')
+                except:
+                    # 如果没有.answer-brief，尝试获取整个区域
+                    # 查找所有display不为none的div
+                    answer_divs = answer_element.find_elements(By.CSS_SELECTOR, "div")
+                    for div in answer_divs:
+                        style = div.get_attribute("style") or ""
+                        if "display:none" not in style and "display: none" not in style:
+                            # 检查是否包含实际内容
+                            if div.find_elements(By.TAG_NAME, "h2") or div.find_elements(By.TAG_NAME, "table"):
+                                answer_html = div.get_attribute('innerHTML')
+                                break
                 
-                for div in answer_divs:
-                    style = div.get_attribute("style")
-                    if style and "display:none" not in style and "display: none" not in style:
-                        text = div.text
-                        if text and len(text) > 100:  # 找到实际内容
-                            answer_text = text
-                            break
+                if not answer_html:
+                    # 最后尝试：获取整个答案区域
+                    answer_html = answer_element.get_attribute('innerHTML')
                 
-                # 如果没找到，尝试直接获取整个区域
-                if not answer_text:
-                    # 尝试使用class="answer-brief"或其他答案class
-                    try:
-                        answer_text = answer_element.find_element(By.CSS_SELECTOR, ".answer-brief").text
-                    except:
-                        answer_text = answer_element.text
+                # 将HTML转换为Markdown
+                answer_text = self.html_to_markdown(answer_html)
                 
                 print(f"  → 答案长度: {len(answer_text)} 字符")
                     
             except Exception as e:
                 print(f"  ✗ 提取答案失败: {e}")
                 answer_text = "未找到答案内容"
+            
+            # 处理问题描述
+            question_text = self.html_to_markdown(question_html)
             
             result = {
                 'question': question_text,
@@ -320,6 +344,206 @@ class NowCoderCrawler:
         except Exception as e:
             print(f"提取内容时出错: {e}")
             return None
+    
+    def html_to_markdown(self, html_content):
+        """将HTML内容转换为Markdown格式"""
+        if not html_content:
+            return ""
+        
+        # 解码HTML实体
+        import html
+        content = html.unescape(html_content)
+        
+        # 转换表格
+        content = self.convert_table_to_markdown(content)
+        
+        # 转换标题 (h1-h4) - 清理多余空格
+        content = re.sub(r'<h1[^>]*>(.*?)</h1>', lambda m: f"\n# {' '.join(re.sub(r'<[^>]+>', '', m.group(1)).split())}\n", content, flags=re.DOTALL)
+        content = re.sub(r'<h2[^>]*>(.*?)</h2>', lambda m: f"\n## {' '.join(re.sub(r'<[^>]+>', '', m.group(1)).split())}\n", content, flags=re.DOTALL)
+        content = re.sub(r'<h3[^>]*>(.*?)</h3>', lambda m: f"\n### {' '.join(re.sub(r'<[^>]+>', '', m.group(1)).split())}\n", content, flags=re.DOTALL)
+        content = re.sub(r'<h4[^>]*>(.*?)</h4>', lambda m: f"\n#### {' '.join(re.sub(r'<[^>]+>', '', m.group(1)).split())}\n", content, flags=re.DOTALL)
+        
+        # 转换代码块
+        content = re.sub(r'<pre[^>]*><code[^>]*>(.*?)</code></pre>', r'\n```\n\1\n```\n', content, flags=re.DOTALL)
+        content = re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', content, flags=re.DOTALL)
+        
+        # 转换列表 - 使用数字列表并清理空格
+        content = re.sub(r'<ul[^>]*>', r'\n', content)
+        content = re.sub(r'</ul>', r'\n', content)
+        content = re.sub(r'<ol[^>]*>', r'\n', content)
+        content = re.sub(r'</ol>', r'\n', content)
+        
+        # 处理列表项 - 清理多余空格，使用数字编号
+        li_items = re.findall(r'<li[^>]*>(.*?)</li>', content, flags=re.DOTALL)
+        for i, item in enumerate(li_items, 1):
+            clean_item = re.sub(r'<[^>]+>', '', item)  # 移除HTML标签
+            clean_item = ' '.join(clean_item.split())  # 清理空格
+            content = content.replace(f'<li{content[content.find("<li"):content.find(">", content.find("<li"))+1-3]}>{item}</li>', f'{i}. {clean_item}\n', 1)
+        
+        # 清理剩余的li标签
+        content = re.sub(r'<li[^>]*>(.*?)</li>', lambda m: f"- {' '.join(re.sub(r'<[^>]+>', '', m.group(1)).split())}\n", content, flags=re.DOTALL)
+        
+        # 转换加粗和斜体
+        content = re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', content, flags=re.DOTALL)
+        content = re.sub(r'<b[^>]*>(.*?)</b>', r'**\1**', content, flags=re.DOTALL)
+        content = re.sub(r'<em[^>]*>(.*?)</em>', r'*\1*', content, flags=re.DOTALL)
+        content = re.sub(r'<i[^>]*>(.*?)</i>', r'*\1*', content, flags=re.DOTALL)
+        
+        # 转换链接（但排除"复制代码"链接）
+        content = re.sub(r'<a[^>]*href=["\']#["\'][^>]*>复制代码</a>', '', content)  # 先移除复制代码链接
+        content = re.sub(r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'[\2](\1)', content, flags=re.DOTALL)
+        
+        # 转换图片 - 保留所有图片
+        content = re.sub(r'<img[^>]*src=["\']([^"\']*)["\'][^>]*alt=["\']([^"\']*)["\'][^>]*>', r'![\2](\1)', content)
+        content = re.sub(r'<img[^>]*src=["\']([^"\']*)["\'][^>]*>', r'![](\1)', content)
+        
+        # 转换段落和换行
+        content = re.sub(r'<br\s*/?>', r'\n', content)
+        content = re.sub(r'<p[^>]*>(.*?)</p>', r'\n\1\n', content, flags=re.DOTALL)
+        content = re.sub(r'<div[^>]*>(.*?)</div>', r'\1\n', content, flags=re.DOTALL)
+        
+        # 移除其他HTML标签
+        content = re.sub(r'<[^>]+>', '', content)
+        
+        # 移除各种形式的"复制代码"文本
+        content = re.sub(r'\[?复制代码\]?\s*\(#\)', '', content)  # [复制代码](#)
+        content = re.sub(r'^\s*复制代码\s*$', '', content, flags=re.MULTILINE)  # 单独一行的"复制代码"
+        content = re.sub(r'复制代码\s*\n', '\n', content)  # 后面紧跟换行的"复制代码"
+        
+        # 清理每行的多余空格
+        lines = content.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            # 保留代码块和表格的格式
+            if '```' in line or line.strip().startswith('|'):
+                cleaned_lines.append(line)
+            else:
+                # 清理行内多余空格
+                cleaned_line = ' '.join(line.split())
+                cleaned_lines.append(cleaned_line)
+        content = '\n'.join(cleaned_lines)
+        
+        # 清理多余的空行
+        content = re.sub(r'\n{3,}', r'\n\n', content)
+        
+        return content.strip()
+    
+    def convert_table_to_markdown(self, html_content):
+        """将HTML表格转换为Markdown表格格式"""
+        import re
+        
+        def table_replacer(match):
+            table_html = match.group(0)
+            
+            # 检查是否为代码表格(带有gutter和code类名的行号表格)
+            if 'class="gutter"' in table_html or 'class="code"' in table_html:
+                # 提取代码内容(跳过行号列)
+                code_lines = []
+                # 查找所有代码行
+                code_divs = re.findall(r'<div[^>]*class="[^"]*line[^"]*"[^>]*>(.*?)</div>', table_html, flags=re.DOTALL)
+                
+                for line in code_divs:
+                    # 跳过行号div
+                    if re.search(r'class="[^"]*number\d+[^"]*"', line) and not '<code' in line:
+                        continue
+                    # 提取代码内容
+                    code_text = re.sub(r'<code[^>]*class="[^"]*"[^>]*>', '', line)
+                    code_text = re.sub(r'</code>', '', code_text)
+                    code_text = re.sub(r'<[^>]+>', '', code_text)
+                    # 解码HTML实体
+                    code_text = code_text.replace('&nbsp;', ' ')
+                    code_text = code_text.replace('&lt;', '<')
+                    code_text = code_text.replace('&gt;', '>')
+                    code_text = code_text.replace('&amp;', '&')
+                    code_text = code_text.replace('&quot;', '"')
+                    
+                    if code_text.strip():
+                        code_lines.append(code_text)
+                
+                if code_lines:
+                    # 移除每行开头的独立数字行号
+                    cleaned_lines = []
+                    for line in code_lines:
+                        # 移除行首的纯数字行号（可能带空格）
+                        line = re.sub(r'^\s*\d+\s*$', '', line)
+                        # 移除行首的"数字+空格+代码"格式中的数字部分
+                        line = re.sub(r'^\s*\d+\s+', '', line)
+                        if line.strip():  # 只保留非空行
+                            cleaned_lines.append(line)
+                    
+                    return '\n\n```java\n' + '\n'.join(cleaned_lines) + '\n```\n\n'
+            
+            # 正常表格处理
+            # 提取表头
+            headers = re.findall(r'<th[^>]*>(.*?)</th>', table_html, flags=re.DOTALL)
+            if not headers:
+                # 如果没有th标签，尝试使用第一行的td
+                first_row = re.search(r'<tr[^>]*>(.*?)</tr>', table_html, flags=re.DOTALL)
+                if first_row:
+                    headers = re.findall(r'<td[^>]*>(.*?)</td>', first_row.group(1), flags=re.DOTALL)
+            
+            # 清理表头HTML标签
+            headers = [re.sub(r'<[^>]+>', '', h).strip() for h in headers]
+            
+            # 提取所有行
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, flags=re.DOTALL)
+            
+            markdown_table = []
+            
+            # 添加表头
+            if headers:
+                markdown_table.append('| ' + ' | '.join(headers) + ' |')
+                markdown_table.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+            
+            # 添加数据行
+            for row in rows:
+                # 跳过表头行
+                if '<th' in row:
+                    continue
+                    
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, flags=re.DOTALL)
+                # 清理单元格HTML标签
+                cells = [re.sub(r'<[^>]+>', '', cell).strip() for cell in cells]
+                
+                if cells and len(cells) == len(headers):
+                    markdown_table.append('| ' + ' | '.join(cells) + ' |')
+            
+            return '\n' + '\n'.join(markdown_table) + '\n'
+        
+        # 替换所有表格
+        result = re.sub(r'<table[^>]*>.*?</table>', table_replacer, html_content, flags=re.DOTALL)
+        return result
+    
+    def save_question_as_markdown(self, question_data, source_url):
+        """保存单个问题为Markdown文件"""
+        try:
+            # 生成文件名（使用题号和部分标题）
+            index = question_data['index']
+            title = question_data['title']
+            # 清理标题中的非法字符
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_', '（', '）', '。', '，')).strip()
+            safe_title = safe_title[:50]  # 限制长度
+            
+            filename = f"{index:02d}_{safe_title}.md"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            # 写入Markdown内容
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"# {question_data['title']}\n\n")
+                f.write(f"**题号**: {question_data['index']}\n\n")
+                f.write(f"**来源**: {source_url}\n\n")
+                f.write(f"**爬取时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write("---\n\n")
+                f.write("## 题目\n\n")
+                f.write(f"{question_data['question']}\n\n")
+                f.write("---\n\n")
+                f.write("## 解题思路\n\n")
+                f.write(f"{question_data['answer']}\n")
+            
+            print(f"  ✓ 已保存到: {filepath}")
+            
+        except Exception as e:
+            print(f"  ✗ 保存Markdown失败: {e}")
     
     def save_results(self, results, filename='results.json'):
         """保存结果到文件"""
@@ -361,10 +585,25 @@ def main():
                 f.write(f"【问题描述】\n{item['question']}\n\n")
                 f.write(f"【解题思路】\n{item['answer']}\n\n")
         
+        # 生成Markdown索引文件
+        index_file = os.path.join(crawler.output_dir, 'README.md')
+        with open(index_file, 'w', encoding='utf-8') as f:
+            f.write("# 牛客网面试题库\n\n")
+            f.write(f"**爬取时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"**题目总数**: {len(all_results)}\n\n")
+            f.write("---\n\n")
+            f.write("## 题目列表\n\n")
+            for item in all_results:
+                safe_title = "".join(c for c in item['title'] if c.isalnum() or c in (' ', '-', '_', '（', '）', '。', '，')).strip()[:50]
+                filename = f"{item['index']:02d}_{safe_title}.md"
+                f.write(f"{item['index']}. [{item['title']}]({filename})\n")
+        
         print(f"\n✓ 爬取完成！共爬取 {len(all_results)} 个问题")
         print("结果已保存到:")
         print("  - nowcoder_questions.json (JSON格式)")
         print("  - nowcoder_questions.txt (文本格式)")
+        print(f"  - {crawler.output_dir}/README.md (Markdown索引)")
+        print(f"  - {crawler.output_dir}/ (各题目的Markdown文件)")
         
     except Exception as e:
         print(f"爬取过程出错: {e}")
